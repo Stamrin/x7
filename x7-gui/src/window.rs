@@ -245,6 +245,12 @@ fn asks_for(commands: &[Command], s: &State) -> Vec<Confirm> {
     asks
 }
 
+/// The question under the profile list before a delete; wrapped by the
+/// caller, so a long name stays inside the window.
+fn delete_prompt(name: &str) -> String {
+    format!("Delete the profile \u{201c}{name}\u{201d}? This cannot be undone.")
+}
+
 /// The word beside the status dot at the rail's foot.
 fn status_word(link: Link, error: Option<&str>) -> &'static str {
     match (link, error) {
@@ -311,6 +317,12 @@ pub struct Controls {
     profiles: Vec<String>,
     /// Commands waiting for the user's yes, see `Pending`.
     pending: Option<Pending>,
+    /// The profile clicked in the list; the actions below it apply to it.
+    profile_sel: Option<String>,
+    /// The new name typed for the selected profile.
+    profile_rename: String,
+    /// The profile whose Delete was clicked once; a second click deletes.
+    confirm_delete: Option<String>,
 }
 
 impl Controls {
@@ -341,6 +353,9 @@ impl Controls {
             profile_error: None,
             profiles: Vec::new(),
             pending: None,
+            profile_sel: None,
+            profile_rename: String::new(),
+            confirm_delete: None,
         }
     }
 
@@ -1138,11 +1153,21 @@ impl Controls {
         if self.profiles.is_empty() {
             ui.label(egui::RichText::new("No saved profiles yet").color(p.text_weak));
         }
+        // A click selects; Load, Rename and Delete act on the selection, so
+        // picking a profile to rename or delete never applies it.
         let mut load: Option<String> = None;
+        let mut select: Option<String> = None;
         for name in &self.profiles {
-            let selected = self.profile_pick.as_deref() == Some(name.as_str());
-            let text = egui::RichText::new(name).color(if selected { p.accent } else { p.text });
+            let selected = self.profile_sel.as_deref() == Some(name.as_str());
+            let loaded = self.profile_pick.as_deref() == Some(name.as_str());
+            let shown = if loaded {
+                format!("{name}  (loaded)")
+            } else {
+                name.clone()
+            };
+            let text = egui::RichText::new(shown).color(if selected { p.accent } else { p.text });
             let b = egui::Button::new(text)
+                .truncate()
                 .fill(if selected {
                     p.raised
                 } else {
@@ -1151,8 +1176,85 @@ impl Controls {
                 .stroke(Stroke::NONE)
                 .min_size(Vec2::new(ui.available_width(), ROW_H));
             if ui.add(b).clicked() {
-                load = Some(name.clone());
+                select = Some(name.clone());
             }
+        }
+        if let Some(name) = select {
+            if self.profile_sel.as_deref() != Some(name.as_str()) {
+                self.profile_rename.clear();
+                self.confirm_delete = None;
+            }
+            self.profile_sel = Some(name);
+        }
+        if let Some(picked) = self
+            .profile_sel
+            .clone()
+            .filter(|n| self.profiles.contains(n))
+        {
+            // Three short rows, each sized to the page, so nothing runs past
+            // the window at its smallest width or with a long profile name.
+            ui.add_space(6.0);
+            let armed = self.confirm_delete.as_deref() == Some(picked.as_str());
+            ui.horizontal(|ui| {
+                if ui.button("Load").clicked() {
+                    load = Some(picked.clone());
+                }
+                if !armed && ui.button("Delete").clicked() {
+                    self.confirm_delete = Some(picked.clone());
+                }
+            });
+            if armed {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(delete_prompt(&picked)).color(p.warning))
+                        .wrap(),
+                );
+                ui.horizontal(|ui| {
+                    let yes = egui::RichText::new("Delete").color(p.warning);
+                    if ui.button(yes).clicked() {
+                        self.profile_error = match profile::delete(&picked) {
+                            Ok(()) => {
+                                if self.profile_pick.as_deref() == Some(picked.as_str()) {
+                                    self.profile_pick = None;
+                                }
+                                self.profile_sel = None;
+                                self.nav.profiles_stale = true;
+                                None
+                            }
+                            Err(e) => Some(e.to_string()),
+                        };
+                        self.confirm_delete = None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        self.confirm_delete = None;
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.profile_rename)
+                        .hint_text("New name")
+                        .desired_width((ui.available_width() - 80.0).max(60.0)),
+                );
+                let to = self.profile_rename.trim().to_owned();
+                if ui
+                    .add_enabled(!to.is_empty(), egui::Button::new("Rename"))
+                    .clicked()
+                {
+                    self.profile_error = match profile::rename(&picked, &to) {
+                        Ok(()) => {
+                            if self.profile_pick.as_deref() == Some(picked.as_str()) {
+                                self.profile_pick = Some(to.clone());
+                            }
+                            self.profile_sel = Some(to);
+                            self.profile_rename.clear();
+                            self.confirm_delete = None;
+                            self.nav.profiles_stale = true;
+                            None
+                        }
+                        Err(e) => Some(e.to_string()),
+                    };
+                }
+            });
         }
         if let Some(name) = load {
             self.profile_error =
@@ -1201,6 +1303,7 @@ impl Controls {
                     .and_then(|path| profile::save(&path, &Profile::from_state(s)))
                 {
                     Ok(()) => {
+                        self.profile_sel = Some(name.clone());
                         self.profile_pick = Some(name);
                         self.profile_name.clear();
                         self.nav.profiles_stale = true;
@@ -1441,6 +1544,15 @@ mod tests {
         }
         assert!(Confirm::HighGain.text().contains("600 ohms"));
         assert!(Confirm::HighPower.text().contains("power adapter"));
+    }
+
+    #[test]
+    fn the_delete_prompt_names_the_profile() {
+        let t = delete_prompt("evening");
+        assert!(
+            t.contains("evening") && t.ends_with("cannot be undone."),
+            "{t}"
+        );
     }
 
     #[test]

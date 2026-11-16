@@ -182,6 +182,10 @@ fn main() -> eframe::Result {
             Box::new(move |cc| {
                 let ctx = cc.egui_ctx.clone();
                 theme::install(&ctx);
+                // Before the first frame: a window opened unfocused (from the
+                // tray) on X11 otherwise shows egui's dark default until its
+                // first focus gain asks the portal.
+                theme::apply_desktop_fallback(&ctx);
                 wake.opened(&ctx);
                 Ok(Box::new(window::Controls::new(
                     session, quit, tray_ok, wake,

@@ -257,15 +257,75 @@ pub fn dir() -> PathBuf {
     base.join("x7").join("profiles")
 }
 
-/// The file for a profile name inside `dir()`. A name is one path component
-/// without dots, so the CLI can tell a name from a path: no separators, no
-/// `.`, not empty.
+/// The file for a profile name inside `dir()`: `<name>.toml`. Dots and
+/// spaces are fine (`subwoofer-2.1-80hz`, `living room`); see `check_name`
+/// for what is not.
 pub fn path_for(name: &str) -> Result<PathBuf, Error> {
+    path_in(&dir(), name)
+}
+
+/// A name is the trimmed text, and it must stay one file inside the
+/// profiles directory: not empty, no `/` or `\\`, no control characters,
+/// no leading `.` (that would be `.`, `..` or a hidden file), and no
+/// `.toml` ending, which the CLI takes as a file path.
+pub fn check_name(name: &str) -> Result<&str, Error> {
     let name = name.trim();
-    if name.is_empty() || name.contains(['/', '\\', '.']) {
+    let bad = name.is_empty()
+        || name.contains(['/', '\\'])
+        || name.chars().any(char::is_control)
+        || name.starts_with('.')
+        || name.ends_with(".toml");
+    if bad {
         return Err(Error::Profile(format!("'{name}' is not a profile name")));
     }
-    Ok(dir().join(format!("{name}.toml")))
+    Ok(name)
+}
+
+fn path_in(dir: &Path, name: &str) -> Result<PathBuf, Error> {
+    let name = check_name(name)?;
+    Ok(dir.join(format!("{name}.toml")))
+}
+
+/// Give a saved profile a new name. Never overwrites: the new name must be
+/// free.
+pub fn rename(from: &str, to: &str) -> Result<(), Error> {
+    rename_in(&dir(), from, to)
+}
+
+fn rename_in(dir: &Path, from: &str, to: &str) -> Result<(), Error> {
+    let src = path_in(dir, from)?;
+    let dst = path_in(dir, to)?;
+    if !src.is_file() {
+        return Err(Error::Profile(format!(
+            "no profile named '{}'",
+            from.trim()
+        )));
+    }
+    if dst.exists() {
+        return Err(Error::Profile(format!(
+            "a profile named '{}' exists already",
+            to.trim()
+        )));
+    }
+    fs::rename(&src, &dst)?;
+    Ok(())
+}
+
+/// Delete a saved profile by name. Only files in the profiles directory.
+pub fn delete(name: &str) -> Result<(), Error> {
+    delete_in(&dir(), name)
+}
+
+fn delete_in(dir: &Path, name: &str) -> Result<(), Error> {
+    let path = path_in(dir, name)?;
+    if !path.is_file() {
+        return Err(Error::Profile(format!(
+            "no profile named '{}'",
+            name.trim()
+        )));
+    }
+    fs::remove_file(&path)?;
+    Ok(())
 }
 
 /// Saved profile names, sorted.
@@ -273,8 +333,8 @@ pub fn list() -> Vec<String> {
     list_in(&dir())
 }
 
-/// Names `load` accepts: `*.toml` stems that `path_for` resolves, so a
-/// hand-placed `my.v2.toml` is not offered and then refused.
+/// Names `load` accepts: `*.toml` stems that `path_for` resolves to the same
+/// file, so a hand-placed `.hidden.toml` is not offered and then refused.
 fn list_in(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .map(|entries| {
@@ -432,14 +492,79 @@ mod tests {
         assert!(matches!(e, Error::Profile(_)), "{e}");
     }
 
+    fn tmp_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("x7-profiles-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn rename_moves_a_profile_and_never_overwrites() {
+        let d = tmp_dir("rename");
+        fs::write(d.join("evening.toml"), "[eq]\nenabled = true\n").unwrap();
+        fs::write(d.join("keep.toml"), "[eq]\nenabled = false\n").unwrap();
+        rename_in(&d, "evening", "night").unwrap();
+        assert_eq!(list_in(&d), ["keep", "night"]);
+        let e = rename_in(&d, "night", "keep").unwrap_err();
+        assert!(e.to_string().contains("exists already"), "{e}");
+        assert_eq!(
+            fs::read_to_string(d.join("keep.toml")).unwrap(),
+            "[eq]\nenabled = false\n",
+            "the existing profile is untouched"
+        );
+        assert!(rename_in(&d, "missing", "x").is_err());
+        assert!(rename_in(&d, "night", "../escape").is_err());
+        rename_in(&d, "night", "subwoofer-2.1-80hz").unwrap();
+        assert!(rename_in(&d, "subwoofer-2.1-80hz", "..").is_err());
+        assert_eq!(list_in(&d), ["keep", "subwoofer-2.1-80hz"]);
+    }
+
+    #[test]
+    fn delete_removes_only_the_named_profile() {
+        let d = tmp_dir("delete");
+        fs::write(d.join("a.toml"), "").unwrap();
+        fs::write(d.join("b.toml"), "").unwrap();
+        delete_in(&d, "a").unwrap();
+        assert_eq!(list_in(&d), ["b"]);
+        assert!(delete_in(&d, "a").is_err(), "gone already");
+        assert!(delete_in(&d, "../b").is_err());
+        assert_eq!(list_in(&d), ["b"]);
+    }
+
+    /// Load another profile, then the first one again, over the CLI path
+    /// against the in-memory X7: every value comes back. A profile holds
+    /// only settings the device accepts back, nothing one-way.
+    #[test]
+    fn loading_a_profile_and_loading_back_restores_every_value() {
+        let mut dev = crate::fake::device();
+        let before = Profile::read_device(&mut dev).unwrap();
+        let other = Profile::parse(
+            "[sbx]\nenabled = true\nsurround = true\nsurround-level = 0.3\n\
+             [eq]\nenabled = false\n31hz = -4.0\n\
+             [speakers]\nlayout = \"2.1\"\ncrossover = 80.0\noutput-target = \"line-and-amp\"\n",
+        )
+        .unwrap();
+        for e in other.entries() {
+            e.apply(&mut dev).unwrap();
+        }
+        let changed = Profile::read_device(&mut dev).unwrap();
+        assert_ne!(changed.to_toml(), before.to_toml());
+        for e in before.entries() {
+            e.apply(&mut dev).unwrap();
+        }
+        let after = Profile::read_device(&mut dev).unwrap();
+        assert_eq!(after.to_toml(), before.to_toml());
+    }
+
     #[test]
     fn unmatched_choice_value_is_left_out() {
-        // A layout float the table does not list (a 2.1 set on Windows) is
+        // A layout float the table does not list (9.0, no such layout) is
         // shown by the CLI as a number but cannot be applied, so a profile
         // never contains it.
         let mut s = state();
         let l = settings::find("speakers", "layout").unwrap();
-        s.params.insert((l.hid_group, l.get_id), 2.0);
+        s.params.insert((l.hid_group, l.get_id), 9.0);
         let p = Profile::from_state(&s);
         assert!(
             !lines(&p).iter().any(|l| l.starts_with("layout")),
@@ -493,14 +618,43 @@ mod tests {
                 .ends_with("x7/profiles/gaming.toml")
         );
         assert!(path_for("../etc").is_err());
+        assert!(path_for("..").is_err());
+        assert!(path_for(".").is_err());
         assert!(path_for(".hidden").is_err());
-        assert!(
-            path_for("preset.v2").is_err(),
-            "a dot would make the CLI read it as a path"
-        );
         assert!(path_for("a/b").is_err());
+        assert!(path_for("a\\b").is_err());
+        assert!(path_for("tab\there").is_err());
+        assert!(
+            path_for("evening.toml").is_err(),
+            "the CLI reads it as a path"
+        );
         assert!(path_for("").is_err());
         assert!(path_for("  ").is_err());
+    }
+
+    #[test]
+    fn names_may_have_dots_and_spaces() {
+        assert!(
+            path_for("subwoofer-2.1-80hz")
+                .unwrap()
+                .ends_with("x7/profiles/subwoofer-2.1-80hz.toml")
+        );
+        assert!(
+            path_for(" living room ")
+                .unwrap()
+                .ends_with("x7/profiles/living room.toml")
+        );
+        assert!(
+            path_for("a..b").is_ok(),
+            "two dots inside a name are no path part"
+        );
+        // The names saved before this change still resolve.
+        for old in ["ByDaniel", "subwoofer-2_1-80hz", "vor-subwoofer-20261113"] {
+            assert!(
+                path_for(old).unwrap().ends_with(format!("{old}.toml")),
+                "{old}"
+            );
+        }
     }
 
     #[test]
@@ -545,15 +699,22 @@ mod tests {
     fn list_leaves_out_names_load_would_refuse() {
         let dir = std::env::temp_dir().join(format!("x7-profiles-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        for f in ["desk.toml", "my.v2.toml", "notes.txt", " desk.toml"] {
+        for f in [
+            "desk.toml",
+            "subwoofer-2.1-80hz.toml",
+            "living room.toml",
+            ".hidden.toml",
+            "notes.txt",
+            " desk.toml",
+        ] {
             std::fs::write(dir.join(f), "").unwrap();
         }
         let names = list_in(&dir);
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(
             names,
-            vec!["desk".to_owned()],
-            "a dotted stem fails path_for; a padded stem would load another file"
+            ["desk", "living room", "subwoofer-2.1-80hz"],
+            "dots and spaces are names; a hidden or a padded stem would load another file"
         );
     }
 }
