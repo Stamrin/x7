@@ -52,8 +52,8 @@ enum Cmd {
     },
     /// Scout Mode: `x7 scout` shows, `x7 scout on|off` sets
     Scout { state: Option<String> },
-    /// Profiles: `x7 profile save <file>`, `x7 profile load <file>`; a bare
-    /// name without `/` or `.` means `~/.config/x7/profiles/<name>.toml`
+    /// Profiles: `x7 profile save <file>`, `x7 profile load <file>`; a name
+    /// without `/` or a `.toml` ending means `~/.config/x7/profiles/<name>.toml`
     Profile {
         #[command(subcommand)]
         action: ProfileCmd,
@@ -66,6 +66,12 @@ enum ProfileCmd {
     Save { file: String },
     /// Apply every setting in a file to the device
     Load { file: String },
+    /// List saved profiles
+    List,
+    /// Rename a saved profile; the new name must be free
+    Rename { from: String, to: String },
+    /// Delete a saved profile
+    Delete { name: String },
 }
 
 fn main() {
@@ -86,6 +92,32 @@ fn main() {
 }
 
 fn run(cli: Cli) -> Result<(), Error> {
+    // Commands that never touch the device run before it is opened.
+    match &cli.cmd {
+        Cmd::Profile {
+            action: ProfileCmd::List,
+        } => {
+            for name in x7::profile::list() {
+                println!("{name}");
+            }
+            return Ok(());
+        }
+        Cmd::Profile {
+            action: ProfileCmd::Rename { from, to },
+        } => {
+            x7::profile::rename(from, to)?;
+            println!("renamed {} to {}", from.trim(), to.trim());
+            return Ok(());
+        }
+        Cmd::Profile {
+            action: ProfileCmd::Delete { name },
+        } => {
+            x7::profile::delete(name)?;
+            println!("deleted {}", name.trim());
+            return Ok(());
+        }
+        _ => {}
+    }
     let mut dev = Device::open()?;
     match cli.cmd {
         Cmd::Output { target: None } => {
@@ -137,6 +169,9 @@ fn run(cli: Cli) -> Result<(), Error> {
                 println!("{}", e.line());
             }
         }
+        Cmd::Profile {
+            action: ProfileCmd::List | ProfileCmd::Rename { .. } | ProfileCmd::Delete { .. },
+        } => unreachable!("handled before the device is opened"),
         Cmd::Scout { state: Some(state) } => {
             let on = master_state(&state).ok_or_else(|| Error::UnknownValue {
                 name: "scout",
@@ -170,10 +205,11 @@ fn master_state(text: &str) -> Option<bool> {
     }
 }
 
-/// A bare name is a profile in the shared directory; anything with a `/`
-/// or a `.` is a path as typed.
+/// A name is a profile in the shared directory, dots and spaces included
+/// (`subwoofer-2.1-80hz`). A path has a `/` or ends in `.toml`
+/// (`./mine.toml`, `mine.toml`) and is used as typed.
 fn profile_path(file: &str) -> Result<std::path::PathBuf, Error> {
-    if file.contains('/') || file.contains('.') {
+    if file.contains('/') || file.trim_end().ends_with(".toml") {
         Ok(std::path::PathBuf::from(file))
     } else {
         x7::profile::path_for(file)
@@ -307,6 +343,16 @@ mod tests {
                 .ends_with("x7/profiles/gaming.toml")
         );
         assert!(profile_path("").is_err());
+        // A dot alone no longer makes a path: the name keeps its dots.
+        assert!(
+            profile_path("subwoofer-2.1-80hz")
+                .unwrap()
+                .ends_with("x7/profiles/subwoofer-2.1-80hz.toml")
+        );
+        assert_eq!(
+            profile_path("mine.toml").unwrap(),
+            std::path::PathBuf::from("mine.toml")
+        );
     }
 
     #[test]

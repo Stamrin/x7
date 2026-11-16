@@ -199,7 +199,8 @@ The window has six pages:
   subwoofer gain, output target, auto standby.
 - CrystalVoice: the master switch, echo cancellation, noise reduction,
   Focus with its angle, and the mic Smart Volume.
-- Profiles: save the current settings under a name and load one back.
+- Profiles: save the current settings under a name; select a saved
+  profile to load, rename or delete it (delete asks first).
 
 The CLI covers the same settings. Every group lists its current values
 when called bare, and sets one when given a name and a value:
@@ -212,15 +213,19 @@ x7 sbx crystalizer-level 0.5
 x7 eq preset rock
 x7 eq 125hz -2
 x7 headphones gain high
-x7 speakers layout 2.0
+x7 speakers layout 2.1          # 2.0, 2.1, 3.0, 3.1, 4.0, 4.1, 5.0, 5.1
 x7 voice noise-reduction on
 x7 scout on
 x7 profile save evening        # ~/.config/x7/profiles/evening.toml
 x7 profile load evening
+x7 profile list
+x7 profile rename evening night  # never overwrites
+x7 profile delete night
 ```
 
-Profiles are TOML files in `~/.config/x7/profiles/`; a profile name with
-a `/` or a `.` in it is taken as a path instead.
+Profiles are TOML files in `~/.config/x7/profiles/`. A name may hold dots
+and spaces (`x7 profile save "subwoofer-2.1-80hz"`); an argument with a `/`
+or ending in `.toml` is taken as a file path instead.
 
 Mixer settings such as mic monitoring are not reachable from userspace;
 see "UAC (mixer) from userspace" in [`docs/protocol.md`](docs/protocol.md).
